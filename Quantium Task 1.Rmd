@@ -1,0 +1,147 @@
+---
+title: "Quantium Retail Analytics - Chip Category Analysis"
+author: "Olamilekan Olaiya"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(janitor)
+library(scales)
+
+# Load raw data
+transaction_data <- read_excel("QVI_transaction_data.xlsx")
+customer_data <- read_csv("QVI_purchase_behaviour.csv")
+
+# Clean transaction data
+transaction_data <- transaction_data %>%
+  mutate(DATE = as.Date(DATE, origin = "1899-12-30")) %>%
+  distinct()
+
+dip_products <- c(
+  "Old El Paso Salsa   Dip Tomato Mild 300g",
+  "Doritos Salsa       Medium 300g",
+  "Old El Paso Salsa   Dip Chnky Tom Ht300g",
+  "Woolworths Mild     Salsa 300g",
+  "Old El Paso Salsa   Dip Tomato Med 300g",
+  "Woolworths Medium   Salsa 300g",
+  "Doritos Salsa Mild  300g"
+)
+
+transaction_data <- transaction_data %>%
+  filter(!PROD_NAME %in% dip_products) %>%
+  filter(LYLTY_CARD_NBR != 226000) %>%
+  mutate(
+    BRAND = word(PROD_NAME, 1),
+    BRAND = case_when(
+      BRAND == "Dorito"   ~ "Doritos",
+      BRAND == "Smith"    ~ "Smiths",
+      BRAND %in% c("RRD", "Red") ~ "Red Rock Deli",
+      BRAND == "Infzns"   ~ "Infuzions",
+      BRAND == "Snbts"    ~ "Sunbites",
+      BRAND %in% c("NCC", "Natural") ~ "Natural Chip Co",
+      BRAND %in% c("GrnWves", "Grain") ~ "Grain Waves",
+      BRAND == "WW"       ~ "Woolworths",
+      TRUE ~ BRAND
+    ),
+    PACK_SIZE = parse_number(str_extract(PROD_NAME, "[0-9]+[gG]"))
+  )
+
+# Merge and add remaining features
+merged_data <- transaction_data %>%
+  left_join(customer_data, by = "LYLTY_CARD_NBR") %>%
+  mutate(
+    PRICE_PER_UNIT = TOT_SALES / PROD_QTY,
+    SEGMENT = paste(LIFESTAGE, PREMIUM_CUSTOMER, sep = " - ")
+  )
+```
+```
+
+## 1. Business Problem
+Julia, the Category Manager for chips, needs to understand customer 
+purchasing behaviour to inform the chip category strategy for the 
+next half-year.
+
+## 2. Data Cleaning Summary
+- Removed 1 duplicate row
+- Removed 15,166 non-chip salsa dip products
+- Removed 1 outlier commercial customer (200-unit purchases)
+- Standardized 28 inconsistent brand names into 20 real brands
+- Merged transaction and customer data (100% match rate)
+- Final dataset: 249,667 rows across 71,517 customers
+
+## 3. Key Findings
+
+### Sales by Segment
+```{r chart1, echo=FALSE}
+merged_data %>%
+  group_by(SEGMENT) %>%
+  summarise(total_sales = sum(TOT_SALES)) %>%
+  ggplot(aes(x = reorder(SEGMENT, total_sales), y = total_sales)) +
+  geom_col(fill = "#D55E00") +
+  coord_flip() +
+  scale_y_continuous(labels = dollar_format(scale = 1/1000, suffix = "k")) +
+  labs(title = "Older Families on Budget Plans Drive the Highest Chip Sales",
+       x = NULL, y = "Total Sales") +
+  theme_minimal(base_size = 11)
+```
+
+Older Families - Budget generates the highest total sales ($158k), 
+driven by purchase frequency (4.76 transactions/customer) rather 
+than basket size.
+
+### Sales by Brand
+```{r chart2, echo=FALSE}
+merged_data %>%
+  group_by(BRAND) %>%
+  summarise(total_sales = sum(TOT_SALES)) %>%
+  ggplot(aes(x = reorder(BRAND, total_sales), y = total_sales)) +
+  geom_col(fill = "#D55E00") +
+  coord_flip() +
+  scale_y_continuous(labels = dollar_format(scale = 1/1000, suffix = "k")) +
+  labs(title = "Kettle Leads Chip Sales", x = NULL, y = "Total Sales") +
+  theme_minimal(base_size = 11)
+```
+
+Kettle leads all brands. Doritos sells fewer units than Smiths but 
+earns more revenue, commanding a ~26% price premium per unit.
+
+### Price Per Unit by Customer Tier
+```{r chart3, echo=FALSE}
+merged_data %>%
+  group_by(PREMIUM_CUSTOMER) %>%
+  summarise(avg_price = mean(PRICE_PER_UNIT)) %>%
+  ggplot(aes(x = PREMIUM_CUSTOMER, y = avg_price)) +
+  geom_col(fill = "#0072B2", width = 0.6) +
+  coord_cartesian(ylim = c(0, 4.5)) +
+  labs(title = "Price Per Unit Is Nearly Flat Across Tiers",
+       x = NULL, y = "Avg Price Per Unit") +
+  theme_minimal(base_size = 11)
+```
+
+Price per unit is nearly flat across Budget/Mainstream/Premium 
+(~$3.79-$3.86). Budget customers spend more overall through higher 
+purchase volume (6.96 units/customer vs Premium's 6.73), not price.
+
+## 4. Recommendations
+
+**1. Prioritize Older & Young Families (Budget tier).** Highest 
+total sales and spend per customer, driven by frequency. Target with 
+multi-buy loyalty offers matching their existing small/frequent 
+purchase pattern.
+
+**2. Don't assume Premium tier pays more for chips.** Price is flat 
+across tiers; Premium marketing should focus on volume incentives, 
+not price positioning.
+
+**3. Protect Kettle and Doritos shelf space.** Doritos demonstrates 
+real pricing power (~26% premium over Smiths) despite lower volume - 
+worth testing modest price increases.
+
+**4. Prioritize 175g stock reliability.** Dominant pack size overall 
+and among top segments specifically - no new pack size needed, just 
+availability.
