@@ -1,0 +1,246 @@
+---
+title: "Quantium Retail Strategy & Analytics - Task 2: Trial Store Assessment"
+author: "Olamilekan Olaiya"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(lubridate)
+library(scales)
+
+data <- read_csv("C:/Users/olaiy/OneDrive/Documents/Quantium/cleaned_data/QVI_features_engineered.csv")
+data$DATE <- as.Date(data$DATE)
+data <- data %>% mutate(YEARMONTH = format(DATE, "%Y%m"))
+```
+
+## 1. Business Problem
+
+Julia, Category Manager for chips, ran a new store layout trial in three
+stores (77, 86, 88). This analysis determines whether the trial layout
+had a measurable positive effect on sales, using matched control stores
+as a comparison baseline, and provides a recommendation on wider rollout.
+
+## 2. Methodology
+
+For each trial store, a control store was selected from the remaining
+store population by combining two similarity measures calculated over
+the pre-trial period (July 2018 - January 2019):
+
+- **Pearson correlation** - how closely a candidate store's monthly
+  trend shape matches the trial store's
+- **Magnitude distance** - how close a candidate store's sales/customer
+  scale is to the trial store's, rescaled to a 0-1 score
+
+The two scores were averaged per metric (sales, customers), then
+averaged again across both metrics to produce one overall match score
+per candidate store.
+
+## 3. Monthly Store Metrics
+
+```{r store-metrics}
+store_metrics <- data %>%
+  group_by(STORE_NBR, YEARMONTH) %>%
+  summarise(
+    total_sales = sum(TOT_SALES),
+    total_customers = n_distinct(LYLTY_CARD_NBR),
+    avg_txn_per_customer = n_distinct(TXN_ID) / n_distinct(LYLTY_CARD_NBR),
+    .groups = "drop"
+  )
+head(store_metrics)
+```
+
+## 4. Control Store Selection Functions
+
+```{r functions}
+calculate_correlation <- function(input_table, metric_col, trial_store) {
+  pre_trial <- input_table %>% filter(YEARMONTH < "201902")
+  trial_data <- pre_trial %>% filter(STORE_NBR == trial_store) %>%
+    select(YEARMONTH, trial_metric = all_of(metric_col))
+  other_stores <- pre_trial %>% filter(STORE_NBR != trial_store)
+  other_stores %>%
+    left_join(trial_data, by = "YEARMONTH") %>%
+    group_by(STORE_NBR) %>%
+    summarise(correlation = cor(.data[[metric_col]], trial_metric), .groups = "drop")
+}
+
+calculate_magnitude_distance <- function(input_table, metric_col, trial_store) {
+  pre_trial <- input_table %>% filter(YEARMONTH < "201902")
+  trial_data <- pre_trial %>% filter(STORE_NBR == trial_store) %>%
+    select(YEARMONTH, trial_metric = all_of(metric_col))
+  other_stores <- pre_trial %>% filter(STORE_NBR != trial_store)
+  other_stores %>%
+    left_join(trial_data, by = "YEARMONTH") %>%
+    mutate(abs_diff = abs(.data[[metric_col]] - trial_metric)) %>%
+    group_by(STORE_NBR) %>%
+    summarise(avg_distance = mean(abs_diff), .groups = "drop") %>%
+    mutate(magnitude_score = 1 - (avg_distance - min(avg_distance)) /
+                                  (max(avg_distance) - min(avg_distance)))
+}
+
+select_control_store <- function(store_metrics, trial_store) {
+  sales <- calculate_correlation(store_metrics, "total_sales", trial_store) %>%
+    left_join(calculate_magnitude_distance(store_metrics, "total_sales", trial_store),
+               by = "STORE_NBR") %>%
+    mutate(sales_score = (correlation + magnitude_score) / 2) %>%
+    select(STORE_NBR, sales_score)
+
+  cust <- calculate_correlation(store_metrics, "total_customers", trial_store) %>%
+    left_join(calculate_magnitude_distance(store_metrics, "total_customers", trial_store),
+               by = "STORE_NBR") %>%
+    mutate(cust_score = (correlation + magnitude_score) / 2) %>%
+    select(STORE_NBR, cust_score)
+
+  sales %>%
+    inner_join(cust, by = "STORE_NBR") %>%
+    mutate(overall_score = (sales_score + cust_score) / 2) %>%
+    arrange(desc(overall_score))
+}
+
+plot_trial_vs_control <- function(store_metrics, trial_store, control_store) {
+  store_metrics %>%
+    filter(STORE_NBR %in% c(trial_store, control_store)) %>%
+    mutate(STORE_TYPE = if_else(STORE_NBR == trial_store, "Trial", "Control")) %>%
+    ggplot(aes(x = YEARMONTH, y = total_sales, color = STORE_TYPE, group = STORE_NBR)) +
+    geom_line(linewidth = 1) + geom_point() +
+    geom_vline(xintercept = "201902", linetype = "dashed", color = "gray50") +
+    labs(title = paste("Trial Store", trial_store, "vs Control Store", control_store),
+         subtitle = "Dashed line marks trial period start (Feb 2019)",
+         x = "Month", y = "Total Sales", color = NULL) +
+    scale_color_manual(values = c("Trial" = "#0072B2", "Control" = "#D55E00")) +
+    theme_minimal() + theme(axis.text.x = element_text(angle = 90))
+}
+
+run_trial_ttest <- function(store_metrics, trial_store, control_store) {
+  trial_period <- store_metrics %>%
+    filter(STORE_NBR %in% c(trial_store, control_store),
+           YEARMONTH >= "201902", YEARMONTH <= "201904")
+  t.test(
+    trial_period$total_sales[trial_period$STORE_NBR == trial_store],
+    trial_period$total_sales[trial_period$STORE_NBR == control_store],
+    alternative = "greater"
+  )
+}
+```
+
+## 5. Trial Store 77
+
+```{r store-77-selection}
+selection_77 <- select_control_store(store_metrics, 77)
+head(selection_77, 5)
+```
+
+Store 233 selected as control (overall score 0.988).
+
+```{r store-77-chart}
+plot_trial_vs_control(store_metrics, 77, 233)
+```
+
+```{r store-77-ttest}
+run_trial_ttest(store_metrics, 77, 233)
+```
+
+Result: $62/month average lift, p = 0.054 - borderline, driven by
+customer count growth (43 to 47) while the control store declined
+(43 to 27).
+
+## 6. Trial Store 86
+
+```{r store-86-selection}
+selection_86 <- select_control_store(store_metrics, 86)
+head(selection_86, 5)
+```
+
+Store 155 selected as control (overall score 0.919).
+
+```{r store-86-chart}
+plot_trial_vs_control(store_metrics, 86, 155)
+```
+
+```{r store-86-ttest}
+run_trial_ttest(store_metrics, 86, 155)
+```
+
+Result: $68/month average lift, p = 0.127 - not statistically
+significant; March's spike did not sustain into April.
+
+## 7. Trial Store 88
+
+```{r store-88-selection}
+selection_88 <- select_control_store(store_metrics, 88)
+head(selection_88, 5)
+```
+
+Store 237 selected as control (overall score 0.767).
+
+```{r store-88-chart}
+plot_trial_vs_control(store_metrics, 88, 237)
+```
+
+```{r store-88-ttest}
+run_trial_ttest(store_metrics, 88, 237)
+```
+
+Result: $160/month average lift, p = 0.040 - statistically
+significant, driven by both more customers (122 to 133) and higher
+purchase frequency per customer.
+
+## 8. Combined Comparison
+
+```{r all-stores-chart, fig.height=10}
+comparison_data <- store_metrics %>%
+  filter(STORE_NBR %in% c(77, 233, 86, 155, 88, 237)) %>%
+  mutate(
+    PAIR = case_when(
+      STORE_NBR %in% c(77, 233) ~ "Store 77 vs Control 233",
+      STORE_NBR %in% c(86, 155) ~ "Store 86 vs Control 155",
+      STORE_NBR %in% c(88, 237) ~ "Store 88 vs Control 237"
+    ),
+    STORE_TYPE = if_else(STORE_NBR %in% c(77, 86, 88), "Trial", "Control")
+  )
+
+ggplot(comparison_data, aes(x = YEARMONTH, y = total_sales,
+                             color = STORE_TYPE, group = STORE_NBR)) +
+  geom_line(linewidth = 1) + geom_point() +
+  geom_vline(xintercept = "201902", linetype = "dashed", color = "gray50") +
+  facet_wrap(~PAIR, scales = "free_y", ncol = 1) +
+  labs(title = "Trial vs Control Store Performance Across All Three Trials",
+       subtitle = "Dashed line marks trial period start (Feb 2019)",
+       x = "Month", y = "Total Sales", color = NULL) +
+  scale_color_manual(values = c("Trial" = "#0072B2", "Control" = "#D55E00")) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 90, size = 7),
+        strip.text = element_text(face = "bold"))
+```
+
+## 9. Summary of Findings
+
+| Trial Store | Control | Avg Monthly Lift | p-value | Significant? | Primary Driver |
+|---|---|---|---|---|---|
+| 77 | 233 | +\$62 | 0.054 | Borderline | Customer count growth |
+| 86 | 155 | +\$68 | 0.127 | No | Neither driver moved meaningfully |
+| 88 | 237 | +\$160 | 0.040 | Yes | More customers and higher frequency |
+
+## 10. Recommendations
+
+**1. Store 88's result supports the layout change as effective and should
+anchor further rollout decisions.** Statistically significant lift driven
+by both customer growth and purchase frequency - the strongest, most
+complete evidence in the trial.
+
+**2. Store 77's result is promising but not yet conclusive.** The trend
+is visible but narrowly misses significance, likely due to the short
+3-month trial window; recommend extending the trial period to confirm.
+
+**3. Store 86 shows no credible evidence of impact and should not be
+used to justify a rollout.** Recommend investigating what differs about
+this store's profile to understand why the layout didn't take effect.
+
+**4. Do not recommend an immediate full chain-wide rollout based on this
+trial alone.** Results were inconsistent across the three stores tested.
+A second-phase trial with more stores and a longer test window is
+recommended to identify which store characteristics predict a positive
+response to the layout change.
+
